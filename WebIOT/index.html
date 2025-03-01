@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Motor Control Dashboard - Debug</title>
+    <style>
+        .heading {
+            text-align: center;
+            background-color: rgb(16, 165, 165);
+            padding: 10px;
+            color: white;
+        }
+        .container {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .btn {
+            padding: 10px 20px;
+            margin: 10px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        .btn-primary { background-color: #007bff; color: white; }
+        .btn-danger { background-color: #dc3545; color: white; }
+        .btn-success { background-color: #28a745; color: white; }
+        .btn-warning { background-color: #ffc107; color: white; }
+        .btn-info { background-color: #17a2b8; color: white; }
+        .status {
+            margin-top: 20px;
+            font-size: 18px;
+        }
+    </style>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+</head>
+<body>
+    <h1 class="heading">Motor Control Dashboard</h1>
+    <div class="container">
+        <!-- Control Buttons -->
+        <button id="rotate_cw" class="btn btn-primary">Rotate CW</button>
+        <button id="rotate_ccw" class="btn btn-success">Rotate CCW</button>
+        <button id="home" class="btn btn-warning">Go Home</button>
+        <button id="stop" class="btn btn-danger">Stop</button>
+        <br>
+        <!-- Target Position Input -->
+        <label for="target_position">Target Position (5-360):</label>
+        <input type="number" id="target_position" min="5" max="360">
+        <button id="set_position" class="btn btn-info">Set Position</button>
+        <br>
+        <!-- Status Display -->
+        <div class="status">
+            <p>Encoder Value: <span id="encoder_value">--</span></p>
+            <p>Limit Switch: <span id="limit_switch">--</span></p>
+        </div>
+    </div>
+    <script>
+        const API_URL = "https://backend.thinger.io/v3/users/Suphakrit/devices/Suphakrit/resources";
+        const TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJzdXBoYWtyaXQiLCJzdnIiOiJhcC1zb3V0aGVhc3QuYXdzLnRoaW5nZXIuaW8iLCJ1c3IiOiJTdXBoYWtyaXQifQ.Jx8iMbZBdLXKZ1KplufvFq9wSvfi0WABYIgfPJBcHPU"; // Replace with your Thinger.io token
+
+        // Debug Helper: Log actions and responses
+        function logDebug(message, data = null) {
+            console.log(`[DEBUG] ${message}`, data);
+        }
+
+        // Function to send commands
+        function sendCommand(value) {
+            logDebug("Sending command", { command: value });
+            $.ajax({
+                url: `${API_URL}/command`,
+                type: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${TOKEN}`,
+                    'Content-Type': 'application/json'
+                },
+                data: JSON.stringify({ in: String(value) }),
+                success: function(response) {
+                    logDebug("Command sent successfully", response);
+                },
+                error: function(error) {
+                    console.error("[ERROR] Error sending command:", error);
+                }
+            });
+        }
+
+        // Function to fetch motor status
+        function fetchStatus() {
+            logDebug("Fetching motor status...");
+            $.ajax({
+                url: `${API_URL}/motor_status`,
+                type: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${TOKEN}`
+                },
+                success: function(data) {
+                    logDebug("Motor status fetched successfully", data);
+                    $("#encoder_value").text(data.encoder_value || "--");
+                    $("#limit_switch").text(data.limit_switch === 1 ? "ON" : "OFF");
+                },
+                error: function(error) {
+                    console.error("[ERROR] Error fetching motor status:", error);
+                }
+            });
+        }
+
+        // Button event handlers
+        $("#rotate_cw").click(() => {
+            logDebug("Rotate CW button clicked");
+            sendCommand(1);  // Rotate Clockwise
+        });
+
+        $("#rotate_ccw").click(() => {
+            logDebug("Rotate CCW button clicked");
+            sendCommand(2); // Rotate Counterclockwise
+        });
+
+        $("#home").click(() => {
+            logDebug("Go Home button clicked");
+            sendCommand(4); // Go Home
+        });
+
+        $("#stop").click(() => {
+            logDebug("Stop button clicked");
+            sendCommand(3); // Stop
+        });
+
+        $("#set_position").click(() => {
+            const position = parseInt($("#target_position").val());
+            if (position >= 5 && position <= 360) {
+                logDebug("Set Position button clicked", { position });
+                sendCommand(position); // Set Target Position
+            } else {
+                logDebug("Invalid position entered", { position });
+                alert("Please enter a value between 5 and 360.");
+            }
+        });
+
+        // Fetch status every second
+        setInterval(fetchStatus, 1000);
+
+    </script>
+</body>
+</html>
