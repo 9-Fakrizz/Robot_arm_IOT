@@ -1,15 +1,31 @@
 #include "driver/can.h"
 #include <math.h>
+#include <WiFi.h>
+#include <MQTT.h>
+#include <ArduinoJson.h>
 
+//Wifi Form Phone
+const char ssid[] = "Ok";
+const char pass[] = "q12345678";
+
+//MQTT Server Data
+const char mqtt_broker[] = "test.mosquitto.org";
+const char mqtt_topic[] = "robot/command";
+const char mqtt_topictwo[] = "robot/status";
+const char mqtt_client_id[] = "robot_arm_x";  // must change this string to a unique value
+int MQTT_PORT = 1883;
+
+WiFiClient net;
+MQTTClient client;
 
 // CAN Bus Pin Definitions
 #define CAN_TX_PIN GPIO_NUM_26  // TX Pin สำหรับส่งข้อมูล
 #define CAN_RX_PIN GPIO_NUM_27  // RX Pin สำหรับรับข้อมูล
 
 
-float x = 0.0;  // Test X position
+float x = 0.0;    // Test X position
 float y = 220.0;  // Test Y position
-float z = 220.0;   // Test Z position
+float z = 220.0;  // Test Z position
 
 struct answer {
   float theta0 = 0;
@@ -31,6 +47,12 @@ float x_input = 0;
 float y_input = 0;
 float z_input = 0;
 
+float current_angle_base = 0;
+float current_angle_shoulder = 0;
+float current_angle_elbow = 0;
+
+long timer0;
+
 // Function Prototypes
 void sendTargetAngleCommand(uint16_t motor_id, float target_angle);
 void sendTargetHomeCommand(uint16_t motor_id);
@@ -38,43 +60,71 @@ void receiveAcknowledgment(uint16_t motor_id);
 void setupCAN();
 void handleSerialInput();
 void setHomeFlow();
+void messageReceived();
+void connect();
+void publishAngles(float theta1, float theta2, float theta3);
 
 // Setup
 void setup() {
-    Serial.begin(115200);
-    setupCAN();
-    Serial.println("Master Ready");
-    Serial.println("Enter target position in the format: X,Y,Z");
-    Serial.println("Or type 'SH' to initiate Home Flow");
+  Serial.begin(115200);
+  setupCAN();
+  Serial.println("Master Ready");
+  Serial.println("Enter target position in the format: X,Y,Z");
+  Serial.println("Or type 'SH' to initiate Home Flow");
+  WiFi.begin(ssid, pass);
+  client.begin(mqtt_broker, MQTT_PORT, net);
+  client.onMessage(messageReceived);
+  connect();
+  timer0 = millis();
 }
 
 // Loop
 void loop() {
-    handleSerialInput();
-    // Optionally: Uncommentเพื่อรอรับ acknowledgment จาก slave
-    // receiveAcknowledgment(0x200);
-    delay(100); // หน่วงเวลาเล็กน้อย เพื่อให้การอ่าน Serial ทำงานได้ราบรื่น
+  client.loop();
+  delay(10);
+  if (!client.connected()) {
+    connect();
+  }
+  handleSerialInput();
+  // Optionally: Uncommentเพื่อรอรับ acknowledgment จาก slave
+  // receiveAcknowledgment(0x200);
+  checkAndDisplayCurrentAngle();  // เพิ่มบรรทัดนี้เพื่อตรวจสอบและแสดง
+  delay(100);  // หน่วงเวลาเล็กน้อย เพื่อให้การอ่าน Serial ทำงานได้ราบรื่น
+  if(millis()-timer0 > 5000){
+    publishAngles(current_angle_base, current_angle_shoulder, current_angle_elbow);
+    getAngle(0x200);
+    getAngle(0x300);
+    getAngle(0x400);
+    Serial.print("current angle : ");
+    Serial.print(current_angle_base);
+    Serial.print(", ");
+    Serial.print(current_angle_shoulder);
+    Serial.print(", ");
+    Serial.println(current_angle_elbow);
+    timer0 = millis();
+  }
+
 }
 
 //---------------------------------------------------
 // CAN Bus Setup Function
 //---------------------------------------------------
 void setupCAN() {
-    can_general_config_t g_config = CAN_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, CAN_MODE_NORMAL);
-    can_timing_config_t t_config  = CAN_TIMING_CONFIG_500KBITS();
-    can_filter_config_t f_config   = CAN_FILTER_CONFIG_ACCEPT_ALL();
+  can_general_config_t g_config = CAN_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, CAN_MODE_NORMAL);
+  can_timing_config_t t_config = CAN_TIMING_CONFIG_500KBITS();
+  can_filter_config_t f_config = CAN_FILTER_CONFIG_ACCEPT_ALL();
 
-    if (can_driver_install(&g_config, &t_config, &f_config) != ESP_OK) {
-        Serial.println("Failed to Install CAN Driver");
-        return;
-    }
+  if (can_driver_install(&g_config, &t_config, &f_config) != ESP_OK) {
+    Serial.println("Failed to Install CAN Driver");
+    return;
+  }
 
-    if (can_start() != ESP_OK) {
-        Serial.println("Failed to Start CAN Driver");
-        return;
-    }
+  if (can_start() != ESP_OK) {
+    Serial.println("Failed to Start CAN Driver");
+    return;
+  }
 
-    Serial.println("CAN Bus Initialized");
+  Serial.println("CAN Bus Initialized");
 }
 
 //---------------------------------------------------
@@ -82,178 +132,186 @@ void setupCAN() {
 //---------------------------------------------------
 char receivedData[30];
 void handleSerialInput() {
-    // ตรวจสอบว่ามีข้อมูลเข้ามาทาง Serial หรือไม่
-    if (Serial.available() > 0) {
-        int len = Serial.readBytesUntil('\n', receivedData, sizeof(receivedData) - 1);
-        if (len > 0) {
-            receivedData[len] = '\0'; // เติม null terminator ให้กับสตริง
+  // ตรวจสอบว่ามีข้อมูลเข้ามาทาง Serial หรือไม่
+  if (Serial.available() > 0) {
+    int len = Serial.readBytesUntil('\n', receivedData, sizeof(receivedData) - 1);
+    if (len > 0) {
+      receivedData[len] = '\0';  // เติม null terminator ให้กับสตริง
 
-            // ตรวจสอบคำสั่ง Home (รองรับ "SH", "SH,1", "SH,2", "SH,3")
-            if (strcmp(receivedData, "SH") == 0) {
-                setHomeFlow();
-                Serial.println("Sent Home Flow Command");
+      // ตรวจสอบคำสั่ง Home (รองรับ "SH", "SH,1", "SH,2", "SH,3")
+      if (strcmp(receivedData, "SH") == 0) {
+        setHomeFlow();
+        Serial.println("Sent Home Flow Command");
+      } else if (strcmp(receivedData, "SH,1") == 0) {
+        sendTargetHomeCommand(0x200);
+        Serial.println("Sent Home Flow Command 1");
+      } else if (strcmp(receivedData, "SH,2") == 0) {
+        sendTargetHomeCommand(0x300);
+        Serial.println("Sent Home Flow Command 2");
+      } else if (strcmp(receivedData, "SH,3") == 0) {
+        sendTargetHomeCommand(0x400);
+        Serial.println("Sent Home Flow Command 3");
+      }
+      else if (strcmp(receivedData, "angle0") == 0) {
+        getAngle(0x200);
+        getAngle(0x300);
+        getAngle(0x400);
+        Serial.println("Sent to get angle");
+      }
+
+      // ตรวจสอบรูปแบบ input แบบ "X,Y,Z" สำหรับเปลี่ยนมุมทั้ง 3 ตัวพร้อมกัน
+
+      else if (sscanf(receivedData, "%f,%f,%f", &x_input, &y_input, &z_input) == 3) {
+        // x_input -= 30;
+        // y_input -= 25;
+        // z_input -= 15;
+
+        answer output_answer_1 = calculate_IK(x_input, y_input, z_input, robot_link_1, 1);
+        answer output_answer_2 = calculate_IK(x_input, y_input, z_input, robot_link_1, -1);
+        // Print the results
+        Serial.println("Inverse Kinematics Results (Solution 1):");
+        Serial.print("Theta 0: "); Serial.println(output_answer_1.theta0);
+        Serial.print("Theta 1: "); Serial.println(output_answer_1.theta1);
+        Serial.print("Theta 2: "); Serial.println(output_answer_1.theta2);
+        Serial.println("\nInverse Kinematics Results (Solution 2):");
+        Serial.print("Theta 0: "); Serial.println(output_answer_2.theta0);
+        Serial.print("Theta 1: "); Serial.println(output_answer_2.theta1);
+        Serial.print("Theta 2: "); Serial.println(output_answer_2.theta2);
+        // Verify using Forward Kinematics
+        float fk_x, fk_y, fk_z;
+        calculate_FK(output_answer_1.theta0, output_answer_1.theta1, output_answer_1.theta2, robot_link_1, fk_x, fk_y, fk_z);
+        Serial.println("\nForward Kinematics Check:");
+        Serial.print("Calculated X: ");
+        Serial.println(fk_x);
+        Serial.print("Calculated Y: ");
+        Serial.println(fk_y);
+        Serial.print("Calculated Z: ");
+        Serial.println(fk_z);
+        // Compare with original values
+        Serial.println("\nError Check:");
+        Serial.print("Error in X: ");
+        Serial.println(fabs(fk_x - x_input));
+        Serial.print("Error in Y: ");
+        Serial.println(fabs(fk_y - y_input));
+        Serial.print("Error in Z: ");
+        Serial.println(fabs(fk_z - z_input));
+
+        float fk_x2, fk_y2, fk_z2;
+        calculate_FK(output_answer_2.theta0, output_answer_2.theta1, output_answer_2.theta2, robot_link_1, fk_x2, fk_y2, fk_z2);
+        Serial.println("\nForward Kinematics Check:");
+        Serial.print("Calculated X2: ");
+        Serial.println(fk_x);
+        Serial.print("Calculated Y2: ");
+        Serial.println(fk_y);
+        Serial.print("Calculated Z2: ");
+        Serial.println(fk_z);
+        //Compare with original values
+        Serial.println("\nError Check:");
+        Serial.print("Error in X2: ");
+        Serial.println(fabs(fk_x - x_input));
+        Serial.print("Error in Y2: ");
+        Serial.println(fabs(fk_y - y_input));
+        Serial.print("Error in Z2: ");
+        Serial.println(fabs(fk_z - z_input));
+        Serial.println();
+
+        bool allow_flag = false;
+        float theta1, theta2, theta3;
+        theta1 = output_answer_1.theta0;
+        theta2 = output_answer_1.theta1;
+        theta3 = output_answer_1.theta2 + theta2;
+
+
+        Serial.printf(" Sol 1 is Base=%.2f°, Shoulder=%.2f°, Elbow=%.2f°\n", theta1, theta2, theta3);
+
+        ///// Dead Zone Condition ////
+        if (theta1 < -155 || theta1 > 155) {
+          Serial.println("Dead Zone for Base Link !");
+        } else {
+          if (theta2 < 40 || theta2 > 115) {
+            Serial.println("Dead Zone for Link2 (sol1)!");
+          } else {
+            if (theta2 + theta3 > 91 || theta3 < -60) {
+              Serial.println("Dead Zone for Link3 (sol1)!");
+            } else {
+              Serial.printf(" All PASS for Sol 1");
+              allow_flag = true;
             }
-            else if (strcmp(receivedData, "SH,1") == 0) {
-                sendTargetHomeCommand(0x200);
-                Serial.println("Sent Home Flow Command 1");
-            }
-            else if (strcmp(receivedData, "SH,2") == 0) {
-                sendTargetHomeCommand(0x300);
-                Serial.println("Sent Home Flow Command 2");
-            }
-            else if (strcmp(receivedData, "SH,3") == 0) {
-                sendTargetHomeCommand(0x400);
-                Serial.println("Sent Home Flow Command 3");
-            }
-            // ตรวจสอบรูปแบบ input แบบ "X,Y,Z" สำหรับเปลี่ยนมุมทั้ง 3 ตัวพร้อมกัน
-
-            else if (sscanf(receivedData, "%f,%f,%f", &x_input, &y_input, &z_input) == 3) {
-                // x_input -= 30;
-                // y_input -= 25;
-                // z_input -= 15;
-                
-                answer output_answer_1 = calculate_IK(x_input, y_input, z_input, robot_link_1, 1);
-                answer output_answer_2 = calculate_IK(x_input, y_input, z_input, robot_link_1, -1);
-                // Print the results
-                Serial.println("Inverse Kinematics Results (Solution 1):");
-                Serial.print("Theta 0: "); Serial.println(output_answer_1.theta0);
-                Serial.print("Theta 1: "); Serial.println(output_answer_1.theta1);
-                Serial.print("Theta 2: "); Serial.println(output_answer_1.theta2);
-                Serial.println("\nInverse Kinematics Results (Solution 2):");
-                Serial.print("Theta 0: "); Serial.println(output_answer_2.theta0);
-                Serial.print("Theta 1: "); Serial.println(output_answer_2.theta1);
-                Serial.print("Theta 2: "); Serial.println(output_answer_2.theta2);;
-                // Verify using Forward Kinematics
-                float fk_x, fk_y, fk_z;
-                calculate_FK(output_answer_1.theta0, output_answer_1.theta1, output_answer_1.theta2, robot_link_1, fk_x, fk_y, fk_z);
-                Serial.println("\nForward Kinematics Check:");
-                Serial.print("Calculated X: "); Serial.println(fk_x);
-                Serial.print("Calculated Y: "); Serial.println(fk_y);
-                Serial.print("Calculated Z: "); Serial.println(fk_z);
-                // Compare with original values
-                Serial.println("\nError Check:");
-                Serial.print("Error in X: "); Serial.println(fabs(fk_x - x_input));
-                Serial.print("Error in Y: "); Serial.println(fabs(fk_y - y_input));
-                Serial.print("Error in Z: "); Serial.println(fabs(fk_z - z_input));
-
-                float fk_x2, fk_y2, fk_z2;
-                calculate_FK(output_answer_2.theta0, output_answer_2.theta1, output_answer_2.theta2, robot_link_1, fk_x2, fk_y2, fk_z2);
-                Serial.println("\nForward Kinematics Check:");
-                Serial.print("Calculated X2: "); Serial.println(fk_x);
-                Serial.print("Calculated Y2: "); Serial.println(fk_y);
-                Serial.print("Calculated Z2: "); Serial.println(fk_z);
-                //Compare with original values
-                Serial.println("\nError Check:");
-                Serial.print("Error in X2: "); Serial.println(fabs(fk_x - x_input));
-                Serial.print("Error in Y2: "); Serial.println(fabs(fk_y - y_input));
-                Serial.print("Error in Z2: "); Serial.println(fabs(fk_z - z_input));
-                Serial.println();
-
-                bool allow_flag = false;
-                float theta1, theta2, theta3;
-                theta1 = output_answer_1.theta0;
-                theta2 = output_answer_1.theta1;
-                theta3 = output_answer_1.theta2 + theta2;
-              
-
-                Serial.printf(" Sol 1 is Base=%.2f°, Shoulder=%.2f°, Elbow=%.2f°\n", theta1, theta2, theta3);
-                
-                ///// Dead Zone Condition ////
-                if(theta1 < -155 || theta1 > 155 ){
-                  Serial.println("Dead Zone for Base Link !");
-                }
-                else{
-                  if(theta2 < 40 || theta2 > 115){
-                    Serial.println("Dead Zone for Link2 (sol1)!");
-                  }
-                  else{
-                    if(theta2 + theta3 > 91 || theta3 < -15){
-                      Serial.println("Dead Zone for Link3 (sol1)!");
-                    }
-                    else{
-                      Serial.printf(" All PASS for Sol 1");
-                      allow_flag = true;
-                    }
-                  }
-                }
-
-                if(allow_flag){
-                  sendTargetAngleCommand(0x200, theta1);  // Motor 0x200: Base
-                  sendTargetAngleCommand(0x400, 90);
-                  delay(5000);
-                  sendTargetAngleCommand(0x300, theta2);  // Motor 0x300: Shoulder
-                  delay(8000);
-                  sendTargetAngleCommand(0x400, theta3);  // Motor 0x400: Elbow
-                  Serial.printf("Target angle set (Sol 1): Base=%.2f°, Shoulder=%.2f°, Elbow=%.2f°\n", theta1, theta2, theta3);
-                }
-                else{
-                  theta1 = output_answer_2.theta0;
-                  theta2 = output_answer_2.theta1;
-                  theta3 = output_answer_2.theta2 + theta2;
-                
-
-                  Serial.printf(" Sol 2 is Base=%.2f°, Shoulder=%.2f°, Elbow=%.2f°\n", theta1, theta2, theta3);
-                  
-                  ///// Dead Zone Condition ////
-                  if(theta1 < -155 || theta1 > 155 ){
-                    Serial.println("Dead Zone for Base Link !");
-                  }
-                  else{
-                    if(theta2 < 40 || theta2 > 115){
-                      Serial.println("Dead Zone for Link2 (sol2)!");
-                    }
-                    else{
-                      if(theta3 > 90 || theta3 < -60){
-                        Serial.println("Dead Zone for Link3 (sol2)!");
-                      }
-                      else{
-                        Serial.printf(" All PASS for Sol 2");
-                        allow_flag = true;
-                      }
-                    }
-                  }
-
-                  if(allow_flag){
-                    sendTargetAngleCommand(0x200, theta1);  // Motor 0x200: Base
-                    sendTargetAngleCommand(0x400, 90);
-                    delay(5000);
-                    sendTargetAngleCommand(0x300, theta2);  // Motor 0x300: Shoulder
-                    delay(8000);
-                    sendTargetAngleCommand(0x400, theta3);  // Motor 0x400: Elbow
-                    Serial.printf("Target angle set (Sol 2): Base=%.2f°, Shoulder=%.2f°, Elbow=%.2f°\n", theta1, theta2, theta3);
-                  } 
-                }
-        
-            }
-            // ตรวจสอบรูปแบบ input แบบ "motor,angle" สำหรับเปลี่ยนมุมทีละตัว
-            else {
-                int motor;
-                float angle;
-                if (sscanf(receivedData, "%d,%f", &motor, &angle) == 2) {
-                    switch (motor) {
-                        case 1:
-                            sendTargetAngleCommand(0x200, angle);
-                            Serial.printf("Target angle set for Base: %.2f°\n", angle);
-                            break;
-                        case 2:
-                            sendTargetAngleCommand(0x300, angle);
-                            Serial.printf("Target angle set for Shoulder: %.2f°\n", angle);
-                            break;
-                        case 3:
-                            sendTargetAngleCommand(0x400, angle);
-                            Serial.printf("Target angle set for Elbow: %.2f°\n", angle);
-                            break;
-                        default:
-                            Serial.println("Error: Invalid motor number. Use 1 for Base, 2 for Shoulder, 3 for Elbow");
-                            break;
-                    }
-                }
-                else {
-                    Serial.println("Error: Invalid input format. Use X,Y,Z or 'SH' or motor,angle");
-                }
-            }
+          }
         }
+
+        if (allow_flag) {
+          sendTargetAngleCommand(0x200, theta1);  // Motor 0x200: Base
+          sendTargetAngleCommand(0x400, 90);
+          delay(5000);
+          sendTargetAngleCommand(0x300, theta2);  // Motor 0x300: Shoulder
+          delay(8000);
+          sendTargetAngleCommand(0x400, theta3);  // Motor 0x400: Elbow
+          Serial.printf("Target angle set (Sol 1): Base=%.2f°, Shoulder=%.2f°, Elbow=%.2f°\n", theta1, theta2, theta3);
+        } else {
+          theta1 = output_answer_2.theta0;
+          theta2 = output_answer_2.theta1;
+          theta3 = output_answer_2.theta2 + theta2;
+
+
+          Serial.printf(" Sol 2 is Base=%.2f°, Shoulder=%.2f°, Elbow=%.2f°\n", theta1, theta2, theta3);
+
+          ///// Dead Zone Condition ////
+          if (theta1 < -155 || theta1 > 155) {
+            Serial.println("Dead Zone for Base Link !");
+          } else {
+            if (theta2 < 40 || theta2 > 115) {
+              Serial.println("Dead Zone for Link2 (sol2)!");
+            } else {
+              if (theta3 > 90 || theta3 < -60) {
+                Serial.println("Dead Zone for Link3 (sol2)!");
+              } else {
+                Serial.printf(" All PASS for Sol 2");
+                allow_flag = true;
+              }
+            }
+          }
+
+          if (allow_flag) {
+            sendTargetAngleCommand(0x200, theta1);  // Motor 0x200: Base
+            sendTargetAngleCommand(0x400, 90);
+            delay(5000);
+            sendTargetAngleCommand(0x300, theta2);  // Motor 0x300: Shoulder
+            delay(8000);
+            sendTargetAngleCommand(0x400, theta3);  // Motor 0x400: Elbow
+            Serial.printf("Target angle set (Sol 2): Base=%.2f°, Shoulder=%.2f°, Elbow=%.2f°\n", theta1, theta2, theta3);
+          }
+        }
+
+      }
+      // ตรวจสอบรูปแบบ input แบบ "motor,angle" สำหรับเปลี่ยนมุมทีละตัว
+      else {
+        int motor;
+        float angle;
+        if (sscanf(receivedData, "%d,%f", &motor, &angle) == 2) {
+          switch (motor) {
+            case 1:
+              sendTargetAngleCommand(0x200, angle);
+              Serial.printf("Target angle set for Base: %.2f°\n", angle);
+              break;
+            case 2:
+              sendTargetAngleCommand(0x300, angle);
+              Serial.printf("Target angle set for Shoulder: %.2f°\n", angle);
+              break;
+            case 3:
+              sendTargetAngleCommand(0x400, angle);
+              Serial.printf("Target angle set for Elbow: %.2f°\n", angle);
+              break;
+            default:
+              Serial.println("Error: Invalid motor number. Use 1 for Base, 2 for Shoulder, 3 for Elbow");
+              break;
+          }
+        } else {
+          Serial.println("Error: Invalid input format. Use X,Y,Z or 'SH' or motor,angle");
+        }
+      }
     }
+  }
 }
 
 //---------------------------------------------------
@@ -262,65 +320,100 @@ void handleSerialInput() {
 
 // ส่งคำสั่งเป้าหมายองศาไปยังมอเตอร์ที่ระบุ
 void sendTargetAngleCommand(uint16_t motor_id, float target_angle) {
-    can_message_t message;
-    message.flags = CAN_MSG_FLAG_NONE;
-    message.identifier = motor_id;       // ใช้ motor_id เป็น CAN ID
-    message.data_length_code = 3;          // 3 ไบต์: [Command, High Byte, Low Byte]
+  can_message_t message;
+  message.flags = CAN_MSG_FLAG_NONE;
+  message.identifier = motor_id;  // ใช้ motor_id เป็น CAN ID
+  message.data_length_code = 3;   // 3 ไบต์: [Command, High Byte, Low Byte]
 
-    message.data[0] = 0x01;                // Command: Set Target Angle
-    // แปลงค่าองศาเป็น 16-bit โดยคูณด้วย 100 เพื่อความแม่นยำ
-    uint16_t encoded_angle = (uint16_t)(target_angle * 100);
-    message.data[1] = (encoded_angle >> 8) & 0xFF; // High Byte
-    message.data[2] = encoded_angle & 0xFF;        // Low Byte
+  message.data[0] = 0x01;  // Command: Set Target Angle
+  // แปลงค่าองศาเป็น 16-bit โดยคูณด้วย 100 เพื่อความแม่นยำ
+  uint16_t encoded_angle = (uint16_t)(target_angle * 100);
+  message.data[1] = (encoded_angle >> 8) & 0xFF;  // High Byte
+  message.data[2] = encoded_angle & 0xFF;         // Low Byte
 
-    if (can_transmit(&message, pdMS_TO_TICKS(1000)) == ESP_OK) {
-        Serial.printf("Sent Target Angle %.2f° to Motor ID: 0x%X\n", target_angle, motor_id);
-    } else {
-        Serial.println("Failed to Send Target Angle Command");
+  if (can_transmit(&message, pdMS_TO_TICKS(1000)) == ESP_OK) {
+    Serial.printf("Sent Target Angle %.2f° to Motor ID: 0x%X\n", target_angle, motor_id);
+  } else {
+    Serial.println("Failed to Send Target Angle Command");
+  }
+}
+
+ //เช็คมุมของ link ต่างๆ 
+void checkAndDisplayCurrentAngle() {
+  can_message_t rx_message;
+  
+  if (can_receive(&rx_message, pdMS_TO_TICKS(100)) == ESP_OK) {
+    if (rx_message.data_length_code == 3 && rx_message.data[0] == 0x02) {
+      int16_t raw_value = (rx_message.data[1] << 8) | rx_message.data[2];
+      float current_angle = raw_value / 100.0;  // แปลงเป็น float
+      // Serial.printf("Received raw_value: %d\n", raw_value);
+      // Serial.printf("Received Current Angle from Motor ID: 0x%X = %.2f°\n", rx_message.identifier, current_angle);
+      if(rx_message.identifier == 0x200){
+        current_angle_base = current_angle;
+      }
+      else if(rx_message.identifier == 0x300){
+        current_angle_shoulder = current_angle;
+      }
+      else if(rx_message.identifier == 0x400){
+        current_angle_elbow = current_angle;
+      }
     }
+  }
+}
+void getAngle(uint16_t motor_id){
+  can_message_t message;
+  message.flags = CAN_MSG_FLAG_NONE;
+  message.identifier = motor_id;
+  message.data_length_code = 1;
+  message.data[0] = 0x02;  // Command: Home
+
+  if (can_transmit(&message, pdMS_TO_TICKS(1000)) == ESP_OK) {
+    // Serial.printf("get angle of Motor ID: 0x%X\n", motor_id);
+  } else {
+    Serial.println("Failed to get angle Command");
+  }
 }
 
 // ส่งคำสั่ง Home (กลับ Home) ให้กับมอเตอร์ที่ระบุ
 void sendTargetHomeCommand(uint16_t motor_id) {
-    can_message_t message;
-    message.flags = CAN_MSG_FLAG_NONE;
-    message.identifier = motor_id;
-    message.data_length_code = 1;
-    message.data[0] = 0x03;  // Command: Home
+  can_message_t message;
+  message.flags = CAN_MSG_FLAG_NONE;
+  message.identifier = motor_id;
+  message.data_length_code = 1;
+  message.data[0] = 0x03;  // Command: Home
 
-    if (can_transmit(&message, pdMS_TO_TICKS(1000)) == ESP_OK) {
-        Serial.printf("Sent Home Command to Motor ID: 0x%X\n", motor_id);
-    } else {
-        Serial.println("Failed to Send Home Command");
-    }
+  if (can_transmit(&message, pdMS_TO_TICKS(1000)) == ESP_OK) {
+    Serial.printf("Sent Home Command to Motor ID: 0x%X\n", motor_id);
+  } else {
+    Serial.println("Failed to Send Home Command");
+  }
 }
 
 // ฟังก์ชันส่งคำสั่ง Home Flow ให้กับมอเตอร์ที่ต้องการ (สามารถปรับเปลี่ยนได้ตามลำดับ)
 void setHomeFlow() {
-    sendTargetHomeCommand(0x200);
-    sendTargetHomeCommand(0x400);
-    delay(6000);
-    sendTargetAngleCommand(0x400,45.0);
-    delay(5000);
-    sendTargetHomeCommand(0x300);
-    delay(10000);
-    sendTargetHomeCommand(0x400);
-
+  sendTargetHomeCommand(0x200);
+  sendTargetHomeCommand(0x400);
+  delay(6000);
+  sendTargetAngleCommand(0x400, 45.0);
+  delay(5000);
+  sendTargetHomeCommand(0x300);
+  delay(10000);
+  sendTargetHomeCommand(0x400);
 }
 
 // รับข้อความยืนยัน (Acknowledgment) จาก Slave (ตัวอย่าง)
 // สามารถนำไปใช้เพิ่มเติมได้หากต้องการตรวจสอบผลการส่งคำสั่ง
 void receiveAcknowledgment(uint16_t motor_id) {
-    can_message_t rx_message;
-    if (can_receive(&rx_message, pdMS_TO_TICKS(1000)) == ESP_OK) {
-        if (rx_message.identifier == motor_id) {
-            Serial.printf("Acknowledgment received from Motor ID: 0x%X\n", motor_id);
-        } else {
-            Serial.printf("Unexpected response from ID: 0x%X\n", rx_message.identifier);
-        }
+  can_message_t rx_message;
+  if (can_receive(&rx_message, pdMS_TO_TICKS(1000)) == ESP_OK) {
+    if (rx_message.identifier == motor_id) {
+      Serial.printf("Acknowledgment received from Motor ID: 0x%X\n", motor_id);
     } else {
-        Serial.printf("No response from Motor ID: 0x%X\n", motor_id);
+      Serial.printf("Unexpected response from ID: 0x%X\n", rx_message.identifier);
     }
+  } else {
+    Serial.printf("No response from Motor ID: 0x%X\n", motor_id);
+  }
 }
 answer calculate_IK(float x, float y, float z, link_robot_t robot_link_1, int solution) {
   float l1 = robot_link_1.l1;
@@ -335,7 +428,7 @@ answer calculate_IK(float x, float y, float z, link_robot_t robot_link_1, int so
   c = constrain(c, -1.0, 1.0);
 
   float theta2 = acos(c);
-  if (solution == -1) theta2 = -theta2; // Alternative solution
+  if (solution == -1) theta2 = -theta2;  // Alternative solution
 
   float a1 = l1 + (l2 * cos(theta2));
   float b1 = l2 * sin(theta2);
@@ -370,5 +463,131 @@ void calculate_FK(float theta0, float theta1, float theta2, link_robot_t robot_l
   out_x = w * sin(theta0);
   out_y = w * cos(theta0);
   out_z = (l1 * sin(theta1)) + (l2 * sin(theta1 + theta2));
+}
 
+void messageReceived(String &topic, String &payload) {
+  Serial.println("Message received:");
+  Serial.println("Topic: " + topic);
+  Serial.println("Payload: " + payload);
+
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, payload);
+
+  if (error) {
+    Serial.print("JSON parsing failed: ");
+    Serial.println(error.f_str());
+    return;
+  }
+
+  if (doc.containsKey("command")) {
+    String command = doc["command"].as<String>(); // Extract command as String
+    Serial.print("Command received: ");
+    Serial.println(command);
+
+    if (command == "SH") {
+      setHomeFlow();
+      Serial.println("Sent Home Flow Command");
+    } else if (command == "SH,1") {
+      sendTargetHomeCommand(0x200);
+      Serial.println("Sent Home Flow Command 1");
+    } else if (command == "SH,2") {
+      sendTargetHomeCommand(0x300);
+      Serial.println("Sent Home Flow Command 2");
+    } else if (command == "SH,3") {
+      sendTargetHomeCommand(0x400);
+      Serial.println("Sent Home Flow Command 3");
+    } else if (command == "angle") {
+      getAngle(0x200);
+      getAngle(0x300);
+      getAngle(0x400);
+      Serial.println("Sent to get angle");
+    } else {
+      float x_input, y_input, z_input;
+      if (sscanf(command.c_str(), "%f,%f,%f", &x_input, &y_input, &z_input) == 3) {
+        answer output_answer_1 = calculate_IK(x_input, y_input, z_input, robot_link_1, 1);
+        answer output_answer_2 = calculate_IK(x_input, y_input, z_input, robot_link_1, -1);
+        
+        Serial.println("Inverse Kinematics Results:");
+        Serial.printf("Solution 1: Theta0=%.2f, Theta1=%.2f, Theta2=%.2f\n", output_answer_1.theta0, output_answer_1.theta1, output_answer_1.theta2);
+        Serial.printf("Solution 2: Theta0=%.2f, Theta1=%.2f, Theta2=%.2f\n", output_answer_2.theta0, output_answer_2.theta1, output_answer_2.theta2);
+        
+        bool allow_flag = false;
+        float theta1 = output_answer_1.theta0;
+        float theta2 = output_answer_1.theta1;
+        float theta3 = output_answer_1.theta2 + theta2;
+        
+        if (theta1 >= -155 && theta1 <= 155 && theta2 >= 40 && theta2 <= 115 && theta3 >= -60 && theta3 <= 91) {
+          allow_flag = true;
+        }
+        
+        if (allow_flag) {
+          sendTargetAngleCommand(0x200, theta1);
+          sendTargetAngleCommand(0x400, 90);
+          delay(5000);
+          sendTargetAngleCommand(0x300, theta2);
+          delay(8000);
+          sendTargetAngleCommand(0x400, theta3);
+          Serial.printf("Target angle set: Base=%.2f, Shoulder=%.2f, Elbow=%.2f\n", theta1, theta2, theta3);
+        } else {
+          Serial.println("Dead zone detected, alternative solution will not be executed.");
+        }
+      } else {
+        int motor;
+        float angle;
+        if (sscanf(command.c_str(), "%d,%f", &motor, &angle) == 2) {
+          switch (motor) {
+            case 1:
+              sendTargetAngleCommand(0x200, angle);
+              Serial.printf("Target angle set for Base: %.2f\n", angle);
+              break;
+            case 2:
+              sendTargetAngleCommand(0x300, angle);
+              Serial.printf("Target angle set for Shoulder: %.2f\n", angle);
+              break;
+            case 3:
+              sendTargetAngleCommand(0x400, angle);
+              Serial.printf("Target angle set for Elbow: %.2f\n", angle);
+              break;
+            default:
+              Serial.println("Error: Invalid motor number. Use 1 for Base, 2 for Shoulder, 3 for Elbow");
+              break;
+          }
+        } else {
+          Serial.println("Error: Invalid input format. Use X,Y,Z or 'SH' or motor,angle");
+        }
+      }
+    }
+  } else {
+    Serial.println("Invalid JSON: 'command' key missing");
+  }
+}
+void connect() {
+  Serial.print("checking wifi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(1000);
+  }
+  Serial.print("\nconnecting...");
+  while (!client.connect(mqtt_client_id)) {
+    Serial.print(".");
+    delay(1000);
+  }
+  Serial.println("\nconnected!");
+  delay(500);
+
+  client.subscribe(mqtt_topic);
+  delay(500);
+  client.subscribe(mqtt_topictwo);
+  // client.unsubscribe("/hello");
+}
+void publishAngles(float theta1, float theta2, float theta3) {
+  StaticJsonDocument<200> jsonDoc;
+  jsonDoc["value1"] = theta1;
+  jsonDoc["value2"] = theta2;
+  jsonDoc["value3"] = theta3;
+
+  char buffer[256];
+  serializeJson(jsonDoc, buffer);
+  client.publish(mqtt_topictwo, buffer);
+  Serial.println("Published angles to MQTT");
 }
