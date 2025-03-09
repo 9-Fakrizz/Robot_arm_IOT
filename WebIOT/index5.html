@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Robot Control IoT</title>
+  <!-- Bootstrap CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <!-- jQuery -->
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <!-- Socket.IO -->
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body {
+      background-color: #fff;
+      color: #333;
+    }
+    h1, h5 {
+      color: #c0392b;
+    }
+    /* Control Panel Styles */
+    .control-panel {
+      background-color: #f8f9fa;
+      border: 2px solid #c0392b;
+    }
+    .control-panel .card-header {
+      background-color: #c0392b;
+      color: #fff;
+      font-weight: bold;
+    }
+    .control-panel .btn {
+      border: 1px solid #c0392b;
+    }
+    .control-panel .btn:hover {
+      background-color: #c0392b;
+      color: #fff;
+    }
+    .control-panel input,
+    .control-panel .form-range {
+      background-color: #fff;
+      color: #333;
+      border: 1px solid #c0392b;
+    }
+    /* Motor Status & Command History Styles */
+    .status-panel .card-header {
+      background-color: #c0392b;
+      color: #fff;
+      font-weight: bold;
+    }
+    .log-panel .card-header {
+      background-color: #c0392b;
+      color: #fff;
+      font-weight: bold;
+    }
+    .log-box {
+      max-height: 250px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+    <!-- Warning Modal -->
+    <div id="warningModal" class="modal fade" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header bg-warning">
+            <h5 class="modal-title">⚠ Warning</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body text-center">
+            <p id="warningMessage">Something went wrong!</p>
+            </div>
+            <div class="modal-footer">
+            <button id="clearWarning" class="btn btn-danger" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+        </div>
+    </div>
+  
+  <div class="container my-4">
+    <!-- Project Header -->
+    <h1 class="text-center mb-4">Robot Control IoT</h1>
+    <div class="row">
+      <!-- Left: Control Panel -->
+      <div class="col-md-8 mb-4">
+        <div class="card control-panel shadow">
+          <div class="card-header text-center">
+            Control Panel
+          </div>
+          <div class="card-body">
+            <!-- Command Input -->
+            <div class="mb-4">
+              <label for="user_input" class="form-label">Input Command:</label>
+              <div class="input-group">
+                <input type="text" id="user_input" class="form-control" placeholder="Type your command here" />
+                <button id="send_input" class="btn btn-outline-danger">Send</button>
+              </div>
+            </div>
+            <!-- XYZ Sliders -->
+            <div class="mb-4">
+              <h5>Control X, Y, Z Axes</h5>
+              <div class="mb-3">
+                <label class="form-label">X-Axis: <span id="x_value">0</span></label>
+                <input type="range" id="x_slider" min="-185" max="335" value="0" class="form-range" />
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Y-Axis: <span id="y_value">0</span></label>
+                <input type="range" id="y_slider" min="-185" max="335" value="0" class="form-range" />
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Z-Axis: <span id="z_value">0</span></label>
+                <input type="range" id="z_slider" min="-100" max="440" value="0" class="form-range" />
+              </div>
+              <button id="submit_xyz" class="btn btn-danger w-100">Submit XYZ Values</button>
+            </div>
+            <!-- Angle Sliders -->
+            <div class="mb-4">
+              <h5>Control Angles</h5>
+              <div class="mb-3">
+                <label class="form-label">Angle Base: <span id="angle_base_value">0</span>°</label>
+                <input type="range" id="angle_base_slider" min="-155" max="155" value="0" class="form-range" />
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Angle Shoulder: <span id="angle_shoulder_value">0</span>°</label>
+                <input type="range" id="angle_shoulder_slider" min="40" max="115" value="90" class="form-range" />
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Angle Elbow: <span id="angle_elbow_value">0</span>°</label>
+                <input type="range" id="angle_elbow_slider" min="-60" max="90" value="0" class="form-range" />
+              </div>
+              <button id="submit_angles" class="btn btn-danger w-100">Submit Angles</button>
+            </div>
+            <!-- Preset Commands (ลบปุ่ม Angle Commands ออกแล้ว) -->
+            <div class="mb-4">
+              <h5>Preset Commands</h5>
+              <div class="row g-2">
+                <!-- HOME Commands -->
+                <div class="col-6">
+                  <button id="btn_home" class="btn btn-outline-danger w-100">HOME</button>
+                </div>
+                <div class="col-6">
+                  <button id="btn_home_base" class="btn btn-outline-danger w-100">HOME Base</button>
+                </div>
+                <div class="col-6">
+                  <button id="btn_home_shoulder" class="btn btn-outline-danger w-100">HOME Shoulder</button>
+                </div>
+                <div class="col-6">
+                  <button id="btn_home_elbow" class="btn btn-outline-danger w-100">HOME Elbow</button>
+                </div>
+              </div>
+            </div>
+          </div> <!-- card-body -->
+        </div> <!-- card control-panel -->
+      </div>
+      <!-- Right: Motor Status and Command History -->
+      <div class="col-md-4">
+        <!-- Motor Status Panel -->
+        <div class="card status-panel shadow mb-4">
+          <div class="card-header text-center">
+            Motor Status
+          </div>
+          <div class="card-body">
+            <p class="fs-5">Base:</Base>: <span id="value1" class="fw-bold">--</span></p>
+            <p class="fs-5">Shoulder: <span id="value2" class="fw-bold">--</span></p>
+            <p class="fs-5">elbow: <span id="value3" class="fw-bold">--</span></p>
+          </div>
+        </div>
+        <!-- Command History Panel -->
+        <div class="card log-panel shadow">
+          <div class="card-header text-center">
+            Command History
+          </div>
+          <div class="card-body log-box">
+            <ul id="log" class="list-group list-group-flush">
+              <!-- Commands will be appended here -->
+            </ul>
+            <button id="clearLog" class="btn btn-danger btn-sm mt-2 w-100">Clear History</button>
+          </div>
+        </div>
+        <!-- Warning Message Box -->
+        <div id="warningBox" class="alert alert-warning text-center d-none" role="alert">
+            <strong>Warning:</strong> <span id="warningMessage">Something went wrong!</span>
+            <button id="clearWarning" class="btn btn-danger btn-sm mt-2 w-100">Clear Warning</button>
+        </div>
+      </div>
+    </div> <!-- row -->
+  </div> <!-- container -->
+
+  <!-- Bootstrap Bundle with Popper -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  
+  <!-- JavaScript Logic -->
+  <script>
+    const socket = io();
+    let x = 0, y = 0, z = 0;
+
+    // Function to send command
+    function sendCommand(value) {
+      console.log("Sending command:", value);
+      socket.emit('command', { command: value });
+      $("#log").append(`<li class="list-group-item">${value}</li>`);
+    }
+
+    // Function to show warning popup
+    function showWarning(message) {
+        $("#warningMessage").text(message);
+        var warningModal = new bootstrap.Modal(document.getElementById("warningModal"));
+        warningModal.show();
+    }
+
+    // Listen for MQTT warning messages from the server
+    socket.on("warning", (message) => {
+        showWarning(message);
+    });
+
+    // Send command from input field
+    $("#send_input").click(() => {
+      const input = $("#user_input").val().trim();
+      if (input) {
+        sendCommand(input);
+        $("#user_input").val("");
+      }
+    });
+
+    // Control XYZ sliders
+    $("#x_slider").on("input", function() {
+      x = $(this).val();
+      $("#x_value").text(x);
+    });
+    $("#y_slider").on("input", function() {
+      y = $(this).val();
+      $("#y_value").text(y);
+    });
+    $("#z_slider").on("input", function() {
+      z = $(this).val();
+      $("#z_value").text(z);
+    });
+    $("#submit_xyz").click(() => {
+      const xyz_command = `${x},${y},${z}`;
+      sendCommand(xyz_command);
+    });
+
+    // Control Angle sliders
+    $("#angle_base_slider").on("input", function() {
+      $("#angle_base_value").text($(this).val());
+    });
+    $("#angle_shoulder_slider").on("input", function() {
+      $("#angle_shoulder_value").text($(this).val());
+    });
+    $("#angle_elbow_slider").on("input", function() {
+      $("#angle_elbow_value").text($(this).val());
+    });
+    $("#submit_angles").click(() => {
+      const base = $("#angle_base_slider").val();
+      const shoulder = $("#angle_shoulder_slider").val();
+      const elbow = $("#angle_elbow_slider").val();
+      // ส่งคำสั่งแยกเป็น 3 คำสั่งสำหรับแต่ละมุม
+      sendCommand(`1,${base}`);
+      sendCommand(`2,${shoulder}`);
+      sendCommand(`3,${elbow}`);
+    });
+
+    // Preset Buttons for HOME Commands
+    $("#btn_home").click(() => {
+      sendCommand("SH");
+    });
+    $("#btn_home_base").click(() => {
+      sendCommand("SH,1");
+    });
+    $("#btn_home_shoulder").click(() => {
+      sendCommand("SH,2");
+    });
+    $("#btn_home_elbow").click(() => {
+      sendCommand("SH,3");
+    });
+
+    // Clear Command History
+    $("#clearLog").click(() => {
+      $("#log").html("");
+    });
+
+      // Clear Command History
+    $("#clearWarning").click(() => {
+        hideWarning()
+    });
+
+    // Receive status from backend (if available)
+    socket.on('status', (data) => {
+      console.log("Received status:", data);
+      $("#value1").text(data.value1 + "°" || "--°");
+      $("#value2").text(data.value2 + "°" || "--°");
+      $("#value3").text(data.value3 + "°" || "--°");
+    });
+
+  </script>
+</body>
+</html>
