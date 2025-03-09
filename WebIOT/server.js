@@ -7,6 +7,7 @@ const mqtt = require('mqtt');
 const MQTT_BROKER = "mqtt://test.mosquitto.org";
 const MQTT_TOPIC_COMMAND = "robot/command";
 const MQTT_TOPIC_STATUS = "robot/status";
+const MQTT_TOPIC_WARNING = "robot/warning"; // New warning topic
 
 // Initialize the app
 const app = express();
@@ -19,11 +20,11 @@ const client = mqtt.connect(MQTT_BROKER);
 
 client.on("connect", () => {
     console.log("Connected to MQTT broker");
-    client.subscribe([MQTT_TOPIC_STATUS, MQTT_TOPIC_COMMAND], (err) => {
+    client.subscribe([MQTT_TOPIC_STATUS, MQTT_TOPIC_COMMAND, MQTT_TOPIC_WARNING], (err) => {
         if (err) {
             console.error("Failed to subscribe:", err);
         } else {
-            console.log(`Subscribed to topics: ${MQTT_TOPIC_STATUS}, ${MQTT_TOPIC_COMMAND}`);
+            console.log(`Subscribed to topics: ${MQTT_TOPIC_STATUS}, ${MQTT_TOPIC_COMMAND}, ${MQTT_TOPIC_WARNING}`);
         }
     });
 });
@@ -38,6 +39,13 @@ client.on("message", (topic, message) => {
             io.emit("status", { value1, value2, value3 });
             console.log(`Status Updated: Value1=${value1}, Value2=${value2}, Value3=${value3}`);
         }
+
+        if (topic === MQTT_TOPIC_WARNING) {
+            // Send warning message to frontend
+            io.emit("warning", payload);
+            console.log(`Warning Received: ${payload}`);
+        }
+
     } catch (error) {
         console.error("Error parsing MQTT message:", error);
     }
@@ -45,7 +53,7 @@ client.on("message", (topic, message) => {
 
 // Serve the HTML file
 app.get("/", (req, res) => {
-    res.sendFile(__dirname + "/index3.html");
+    res.sendFile(__dirname + "/index5.html");
 });
 
 // Socket.IO connection handler
